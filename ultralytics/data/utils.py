@@ -477,6 +477,29 @@ def check_det_dataset(dataset: str, autodownload: bool = True) -> dict[str, Any]
     return data  # dictionary
 
 
+def check_normalize(mean: list[float] | None, std: list[float] | None, channels: int | None, context: str) -> None:
+    """Validate normalize mean/std lengths and presence."""
+    if mean is None and std is None:
+        return
+    if mean is None or std is None:
+        raise ValueError(f"{context}: both normalize_mean and normalize_std must be set.")
+    if not hasattr(mean, "__len__") or not hasattr(std, "__len__"):
+        raise ValueError(f"{context}: normalize_mean/std must be sequences with length equal to channels.")
+    if len(mean) != len(std):
+        raise ValueError(f"{context}: normalize_mean length {len(mean)} != normalize_std length {len(std)}.")
+    if channels is not None and len(mean) != channels:
+        raise ValueError(f"{context}: normalize_mean/std length {len(mean)} != channels {channels}.")
+
+
+def sync_args_with_data(args: Any, data: dict[str, Any] | None) -> None:
+    """Sync dataset-specific image settings into args for persistence."""
+    if not isinstance(data, dict):
+        return
+    for key in ("normalize_mean", "normalize_std", "padding_value"):
+        if data.get(key) is not None:
+            setattr(args, key, data[key])
+
+
 def check_cls_dataset(dataset: str | Path, split: str = "") -> dict[str, Any]:
     """Check a classification dataset such as Imagenet.
 

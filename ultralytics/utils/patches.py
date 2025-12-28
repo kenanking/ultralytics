@@ -17,30 +17,69 @@ import torch
 _imshow = cv2.imshow  # copy to avoid recursion errors
 
 
+def _apply_imread_flags(img: np.ndarray | None, flags: int) -> np.ndarray | None:
+    """Apply cv2 imread-like flags to a decoded image."""
+    if img is None:
+        return None
+    if flags == cv2.IMREAD_GRAYSCALE:
+        if img.ndim == 3 and img.shape[2] > 1:
+            if img.shape[2] == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            else:
+                img = img.mean(axis=2)
+        if img.ndim == 2:
+            img = img[..., None]
+        return img
+    if flags == cv2.IMREAD_COLOR:
+        if img.ndim == 2:
+            img = np.repeat(img[..., None], 3, axis=2)
+        elif img.shape[2] == 1:
+            img = np.repeat(img, 3, axis=2)
+        elif img.shape[2] > 3:
+            img = img[..., :3]
+        return img
+    return img[..., None] if img.ndim == 2 else img
+
+
 def imread(filename: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | None:
     """Read an image from a file with multilanguage filename support.
+
+    Supports float TIFF images by preserving original dtype. For TIFF files,
+    cv2.IMREAD_UNCHANGED is used to retain float32/float64 data types.
 
     Args:
         filename (str): Path to the file to read.
         flags (int, optional): Flag that can take values of cv2.IMREAD_*. Controls how the image is read.
 
     Returns:
-        (np.ndarray | None): The read image array, or None if reading fails.
+        (np.ndarray | None): The read image array, or None if reading fails. For TIFF files,
+            the original dtype (including float32/float64) is preserved.
 
     Examples:
         >>> img = imread("path/to/image.jpg")
         >>> img = imread("path/to/image.jpg", cv2.IMREAD_GRAYSCALE)
+        >>> float_img = imread("path/to/float_image.tiff")  # Preserves float dtype
     """
-    file_bytes = np.fromfile(filename, np.uint8)
     if filename.endswith((".tiff", ".tif")):
+        # Read TIFF with IMREAD_UNCHANGED to preserve original dtype (including float32/float64)
+        # Use binary read to ensure proper handling of float data
+        with open(filename, "rb") as f:
+            file_bytes = np.frombuffer(f.read(), dtype=np.uint8)
         success, frames = cv2.imdecodemulti(file_bytes, cv2.IMREAD_UNCHANGED)
         if success:
-            # Handle multi-frame TIFFs and color images
-            return frames[0] if len(frames) == 1 and frames[0].ndim == 3 else np.stack(frames, axis=2)
+            img = frames[0]
+            if len(frames) > 1:
+                # Multi-frame TIFF: stack frames along channel axis
+                img = np.stack(frames, axis=2)
+            img = _apply_imread_flags(img, flags)
+            if img is not None and img.dtype == np.float64:
+                img = img.astype(np.float32)
+            return img
         return None
     else:
+        file_bytes = np.fromfile(filename, np.uint8)
         im = cv2.imdecode(file_bytes, flags)
-        return im[..., None] if im is not None and im.ndim == 2 else im  # Always ensure 3 dimensions
+        return _apply_imread_flags(im, flags)  # Always ensure 3 dimensions
 
 
 def imwrite(filename: str, img: np.ndarray, params: list[int] | None = None) -> bool:

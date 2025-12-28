@@ -123,6 +123,11 @@ copy_paste_mode: flip # (str) copy-paste strategy for segmentation: flip or mixu
 auto_augment: randaugment # (str) classification auto augmentation policy: randaugment, autoaugment, augmix
 erasing: 0.4 # (float) random erasing probability for classification (0–0.9), <1.0
 
+# Normalization settings (for float images) ----------------------------------------------------------------------------
+normalize_mean: # (list[float], optional) per-channel mean for normalization; if set, uses (img - mean) / std
+normalize_std: # (list[float], optional) per-channel std for normalization; if set, uses (img - mean) / std
+padding_value: 114 # (int | float) padding value for letterbox/mosaic augmentation; 114 for uint8, 0.0 for float images
+
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) path to a config.yaml that overrides defaults
 

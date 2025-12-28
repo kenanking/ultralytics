@@ -85,7 +85,11 @@ class YOLODataset(BaseDataset):
         self.use_obb = task == "obb"
         self.data = data
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
-        super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
+        # Resolve padding_value (data.yaml overrides args)
+        padding_value = kwargs.pop("padding_value", 114)
+        if data and data.get("padding_value") is not None:
+            padding_value = data["padding_value"]
+        super().__init__(*args, channels=self.data.get("channels", 3), padding_value=padding_value, **kwargs)
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict:
         """Cache dataset labels, check images and read shapes.
@@ -218,7 +222,10 @@ class YOLODataset(BaseDataset):
             hyp.cutmix = hyp.cutmix if self.augment and not self.rect else 0.0
             transforms = v8_transforms(self, self.imgsz, hyp)
         else:
-            transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+            # Pass padding_value to LetterBox for float image support
+            transforms = Compose(
+                [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False, padding_value=self.padding_value)]
+            )
         transforms.append(
             Format(
                 bbox_format="xywh",

@@ -85,6 +85,7 @@ class BaseDataset(Dataset):
         classes: list[int] | None = None,
         fraction: float = 1.0,
         channels: int = 3,
+        padding_value: float = 114,
     ):
         """Initialize BaseDataset with given configuration and options.
 
@@ -104,6 +105,7 @@ class BaseDataset(Dataset):
             fraction (float): Fraction of dataset to utilize.
             channels (int): Number of channels in the images (1 for grayscale, 3 for color). Color images loaded with
                 OpenCV are in BGR channel order.
+            padding_value (float): Value used for padding in augmentations. Default 114 for uint8, 0.0 for float images.
         """
         super().__init__()
         self.img_path = img_path
@@ -113,6 +115,7 @@ class BaseDataset(Dataset):
         self.prefix = prefix
         self.fraction = fraction
         self.channels = channels
+        self.padding_value = padding_value
         self.cv2_flag = cv2.IMREAD_GRAYSCALE if channels == 1 else cv2.IMREAD_COLOR
         self.im_files = self.get_img_files(self.img_path)
         self.labels = self.get_labels()

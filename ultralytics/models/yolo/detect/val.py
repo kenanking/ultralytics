@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
+from ultralytics.data.utils import check_normalize
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, RANK, nms, ops
 from ultralytics.utils.checks import check_requirements
@@ -63,6 +64,9 @@ class DetectionValidator(BaseValidator):
     def preprocess(self, batch: dict[str, Any]) -> dict[str, Any]:
         """Preprocess batch of images for YOLO validation.
 
+        Supports custom normalization via normalize_mean and normalize_std parameters
+        for float images (e.g., radar data). If not set, uses default /255 normalization.
+
         Args:
             batch (dict[str, Any]): Batch containing images and annotations.
 
@@ -72,7 +76,22 @@ class DetectionValidator(BaseValidator):
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 batch[k] = v.to(self.device, non_blocking=self.device.type == "cuda")
-        batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
+
+        img = batch["img"]
+        img_dtype = img.dtype
+        img = img.half() if self.args.half else img.float()
+
+        mean = getattr(self.args, "normalize_mean", None)
+        std = getattr(self.args, "normalize_std", None)
+        check_normalize(mean, std, img.shape[1], context="val")
+
+        if mean is not None and std is not None:
+            mean = torch.tensor(mean, device=self.device, dtype=img.dtype).view(1, -1, 1, 1)
+            std = torch.tensor(std, device=self.device, dtype=img.dtype).view(1, -1, 1, 1)
+            batch["img"] = (img - mean) / std
+        else:
+            batch["img"] = img / 255 if img_dtype == torch.uint8 else img
+
         return batch
 
     def init_metrics(self, model: torch.nn.Module) -> None:

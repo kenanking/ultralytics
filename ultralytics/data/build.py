@@ -248,6 +248,7 @@ def build_yolo_dataset(
         task=cfg.task,
         classes=cfg.classes,
         data=data,
+        padding_value=cfg.padding_value,
         fraction=cfg.fraction if mode == "train" else 1.0,
     )
 

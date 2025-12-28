@@ -47,6 +47,7 @@ import torch
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data import load_inference_source
+from ultralytics.data.utils import check_normalize
 from ultralytics.data.augment import LetterBox
 from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, colorstr, ops
@@ -151,6 +152,9 @@ class BasePredictor:
     def preprocess(self, im: torch.Tensor | list[np.ndarray]) -> torch.Tensor:
         """Prepare input image before inference.
 
+        Supports custom normalization via normalize_mean and normalize_std parameters
+        for float images (e.g., radar data). If not set, uses default /255 normalization.
+
         Args:
             im (torch.Tensor | list[np.ndarray]): Images of shape (N, 3, H, W) for tensor, [(H, W, 3) x N] for list.
 
@@ -158,6 +162,7 @@ class BasePredictor:
             (torch.Tensor): Preprocessed image tensor of shape (N, 3, H, W).
         """
         not_tensor = not isinstance(im, torch.Tensor)
+        orig_dtype = im.dtype if isinstance(im, torch.Tensor) else None
         if not_tensor:
             im = np.stack(self.pre_transform(im))
             if im.shape[-1] == 3:
@@ -165,11 +170,27 @@ class BasePredictor:
             im = im.transpose((0, 3, 1, 2))  # BHWC to BCHW, (n, 3, h, w)
             im = np.ascontiguousarray(im)  # contiguous
             im = torch.from_numpy(im)
+            orig_dtype = im.dtype
 
         im = im.to(self.device)
         im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
+
         if not_tensor:
-            im /= 255  # 0 - 255 to 0.0 - 1.0
+            # Get normalization params from model args (saved during training)
+            mean = getattr(self.args, "normalize_mean", None)
+            std = getattr(self.args, "normalize_std", None)
+            check_normalize(mean, std, im.shape[1], context="predict")
+
+            if mean is not None and std is not None:
+                # Custom normalization: (img - mean) / std
+                mean = torch.tensor(mean, device=self.device, dtype=im.dtype).view(1, -1, 1, 1)
+                std = torch.tensor(std, device=self.device, dtype=im.dtype).view(1, -1, 1, 1)
+                im = (im - mean) / std
+            else:
+                # Default uint8 normalization
+                if orig_dtype == torch.uint8:
+                    im /= 255  # 0 - 255 to 0.0 - 1.0
+
         return im
 
     def inference(self, im: torch.Tensor, *args, **kwargs):
@@ -191,12 +212,14 @@ class BasePredictor:
             (list[np.ndarray]): List of transformed images.
         """
         same_shapes = len({x.shape for x in im}) == 1
+        padding_value = getattr(self.args, "padding_value", 114)
         letterbox = LetterBox(
             self.imgsz,
             auto=same_shapes
             and self.args.rect
             and (self.model.pt or (getattr(self.model, "dynamic", False) and not self.model.imx)),
             stride=self.model.stride,
+            padding_value=padding_value,
         )
         return [letterbox(image=x) for x in im]
 
@@ -403,6 +426,13 @@ class BasePredictor:
             self.args.imgsz = self.model.imgsz  # reuse imgsz from export metadata
         self.model.eval()
         self.model = attempt_compile(self.model, device=self.device, mode=self.args.compile)
+        model_args = getattr(self.model, "args", None)
+        if model_args is None and hasattr(self.model, "model"):
+            model_args = getattr(self.model.model, "args", None)
+        if model_args is not None:
+            for key in ("normalize_mean", "normalize_std", "padding_value"):
+                if getattr(self.args, key, None) is None and getattr(model_args, key, None) is not None:
+                    setattr(self.args, key, getattr(model_args, key))
 
     def write_results(self, i: int, p: Path, im: torch.Tensor, s: list[str]) -> str:
         """Write inference results to a file or directory.

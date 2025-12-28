@@ -503,6 +503,8 @@ class Mosaic(BaseMixTransform):
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
         self.buffer_enabled = self.dataset.cache != "ram"
+        # Get padding_value from dataset for float image support (default 114 for uint8)
+        self.padding_value = getattr(dataset, "padding_value", 114)
 
     def get_indexes(self):
         """Return a list of random indexes from the dataset for mosaic augmentation.
@@ -588,7 +590,8 @@ class Mosaic(BaseMixTransform):
 
             # Place img in img3
             if i == 0:  # center
-                img3 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 3 tiles
+                # Use dynamic dtype and padding_value for float image support
+                img3 = np.full((s * 3, s * 3, img.shape[2]), self.padding_value, dtype=img.dtype)
                 h0, w0 = h, w
                 c = s, s, s + w, s + h  # xmin, ymin, xmax, ymax (base) coordinates
             elif i == 1:  # right
@@ -645,7 +648,8 @@ class Mosaic(BaseMixTransform):
 
             # Place img in img4
             if i == 0:  # top left
-                img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+                # Use dynamic dtype and padding_value for float image support
+                img4 = np.full((s * 2, s * 2, img.shape[2]), self.padding_value, dtype=img.dtype)
                 x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
                 x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
             elif i == 1:  # top right
@@ -705,7 +709,8 @@ class Mosaic(BaseMixTransform):
 
             # Place img in img9
             if i == 0:  # center
-                img9 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+                # Use dynamic dtype and padding_value for float image support
+                img9 = np.full((s * 3, s * 3, img.shape[2]), self.padding_value, dtype=img.dtype)
                 h0, w0 = h, w
                 c = s, s, s + w, s + h  # xmin, ymin, xmax, ymax (base) coordinates
             elif i == 1:  # top
@@ -869,7 +874,9 @@ class MixUp(BaseMixTransform):
         """
         r = np.random.beta(32.0, 32.0)  # mixup ratio, alpha=beta=32.0
         labels2 = labels["mix_labels"][0]
-        labels["img"] = (labels["img"] * r + labels2["img"] * (1 - r)).astype(np.uint8)
+        # Preserve original dtype for float image support
+        mixed = labels["img"] * r + labels2["img"] * (1 - r)
+        labels["img"] = mixed.astype(labels["img"].dtype)
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
         return labels
@@ -1031,6 +1038,7 @@ class RandomPerspective:
         perspective: float = 0.0,
         border: tuple[int, int] = (0, 0),
         pre_transform=None,
+        padding_value: float = 114,
     ):
         """Initialize RandomPerspective object with transformation parameters.
 
@@ -1046,6 +1054,7 @@ class RandomPerspective:
             border (tuple[int, int]): Tuple specifying mosaic border (top/bottom, left/right).
             pre_transform (Callable | None): Function/transform to apply to the image before starting the random
                 transformation.
+            padding_value (float): Value used for padding border regions. Default 114 for uint8, use 0.0 for float.
         """
         self.degrees = degrees
         self.translate = translate
@@ -1054,6 +1063,7 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
+        self.padding_value = padding_value
 
     def affine_transform(self, img: np.ndarray, border: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, float]:
         """Apply a sequence of affine transformations centered around the image center.
@@ -1110,10 +1120,12 @@ class RandomPerspective:
         M = T @ S @ R @ P @ C  # order of operations (right to left) is IMPORTANT
         # Affine image
         if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():  # image changed
+            # Use scalar padding_value for broad channel compatibility
+            border_value = float(self.padding_value)
             if self.perspective:
-                img = cv2.warpPerspective(img, M, dsize=self.size, borderValue=(114, 114, 114))
+                img = cv2.warpPerspective(img, M, dsize=self.size, borderValue=border_value)
             else:  # affine
-                img = cv2.warpAffine(img, M[:2], dsize=self.size, borderValue=(114, 114, 114))
+                img = cv2.warpAffine(img, M[:2], dsize=self.size, borderValue=border_value)
             if img.ndim == 2:
                 img = img[..., None]
         return img, M, s
@@ -1400,6 +1412,10 @@ class RandomHSV:
             >>> augmented_img = labels["img"]
         """
         img = labels["img"]
+        # Skip HSV augmentation for non-uint8 images (e.g., float TIFF radar data)
+        # HSV uses LUT which only works with uint8
+        if img.dtype != np.uint8:
+            return labels
         if img.shape[-1] != 3:  # only apply to RGB images
             return labels
         if self.hgain or self.sgain or self.vgain:
@@ -2399,6 +2415,9 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace, stretch: bo
         >>> hyp.augmentations = augmentations
         >>> transforms = v8_transforms(dataset, imgsz=640, hyp=hyp)
     """
+    # Get padding_value from dataset for float image support (default 114 for uint8)
+    padding_value = getattr(dataset, "padding_value", 114)
+
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
     affine = RandomPerspective(
         degrees=hyp.degrees,
@@ -2406,7 +2425,8 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace, stretch: bo
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
-        pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
+        pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz), padding_value=padding_value),
+        padding_value=padding_value,
     )
 
     pre_transform = Compose([mosaic, affine])

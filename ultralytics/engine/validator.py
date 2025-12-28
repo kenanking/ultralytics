@@ -32,7 +32,7 @@ import torch
 import torch.distributed as dist
 
 from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.data.utils import check_cls_dataset, check_det_dataset, check_normalize, sync_args_with_data
 from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import LOGGER, RANK, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
@@ -177,6 +177,9 @@ class BaseValidator:
                 self.data = check_cls_dataset(self.args.data, split=self.args.split)
             else:
                 raise FileNotFoundError(emojis(f"Dataset '{self.args.data}' for task={self.args.task} not found ❌"))
+            sync_args_with_data(self.args, self.data)
+            if isinstance(self.data, dict):
+                check_normalize(self.args.normalize_mean, self.args.normalize_std, self.data.get("channels", 3), "val")
 
             if self.device.type in {"cpu", "mps"}:
                 self.args.workers = 0  # faster CPU val as time dominated by inference, not dataloading

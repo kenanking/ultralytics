@@ -25,7 +25,7 @@ from torch import nn, optim
 
 from ultralytics import __version__
 from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.data.utils import check_cls_dataset, check_det_dataset, check_normalize, sync_args_with_data
 from ultralytics.nn.tasks import load_checkpoint
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -161,6 +161,7 @@ class BaseTrainer:
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolo11n -> yolo11n.pt
         with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
             self.data = self.get_dataset()
+        self._sync_image_args()
 
         self.ema = None
 
@@ -214,6 +215,13 @@ class BaseTrainer:
         """Run all existing callbacks associated with a particular event."""
         for callback in self.callbacks.get(event, []):
             callback(self)
+
+    def _sync_image_args(self) -> None:
+        """Sync dataset image settings into args and validate normalization config."""
+        sync_args_with_data(self.args, self.data)
+        if isinstance(self.data, dict):
+            channels = self.data.get("channels", 3)
+            check_normalize(self.args.normalize_mean, self.args.normalize_std, channels, context="train")
 
     def train(self):
         """Allow device='', device=None on Multi-GPU systems to default to device=0."""
