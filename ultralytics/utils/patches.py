@@ -12,6 +12,7 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
+from tifffile import imread as tifffile_imread
 
 # OpenCV Multilanguage-friendly functions ------------------------------------------------------------------------------
 _imshow = cv2.imshow  # copy to avoid recursion errors
@@ -61,21 +62,20 @@ def imread(filename: str, flags: int = cv2.IMREAD_COLOR) -> np.ndarray | None:
         >>> float_img = imread("path/to/float_image.tiff")  # Preserves float dtype
     """
     if filename.endswith((".tiff", ".tif")):
-        # Read TIFF with IMREAD_UNCHANGED to preserve original dtype (including float32/float64)
-        # Use binary read to ensure proper handling of float data
-        with open(filename, "rb") as f:
-            file_bytes = np.frombuffer(f.read(), dtype=np.uint8)
-        success, frames = cv2.imdecodemulti(file_bytes, cv2.IMREAD_UNCHANGED)
-        if success:
-            img = frames[0]
-            if len(frames) > 1:
-                # Multi-frame TIFF: stack frames along channel axis
-                img = np.stack(frames, axis=2)
+        # Use tifffile for reading TIFF to handle multi-channel float data correctly
+        # tifffile preserves the exact format saved (including shape and dtype)
+        try:
+            img = tifffile_imread(filename)
+            # Convert from (C, H, W) to (H, W, C) if multi-channel
+            if img.ndim == 3 and img.shape[0] < img.shape[1] and img.shape[0] < img.shape[2]:
+                # Shape is (C, H, W), transpose to (H, W, C)
+                img = np.transpose(img, (1, 2, 0))
             img = _apply_imread_flags(img, flags)
             if img is not None and img.dtype == np.float64:
                 img = img.astype(np.float32)
             return img
-        return None
+        except Exception:
+            return None
     else:
         file_bytes = np.fromfile(filename, np.uint8)
         im = cv2.imdecode(file_bytes, flags)

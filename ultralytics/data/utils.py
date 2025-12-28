@@ -16,6 +16,7 @@ from typing import Any
 import cv2
 import numpy as np
 from PIL import Image, ImageOps
+from tifffile import imread as tifffile_imread
 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.utils import (
@@ -158,18 +159,29 @@ def verify_image(args: tuple) -> tuple:
     # Number (found, corrupt), message
     nf, nc, msg = 0, 0, ""
     try:
-        im = Image.open(im_file)
-        im.verify()  # PIL verify
-        shape = exif_size(im)  # image size
-        shape = (shape[1], shape[0])  # hw
+        # Use tifffile for TIFF files to handle multi-channel float data
+        if im_file.lower().endswith((".tiff", ".tif")):
+            im_data = tifffile_imread(im_file)
+            # Handle (C, H, W) or (H, W) format
+            if im_data.ndim == 3 and im_data.shape[0] < im_data.shape[1] and im_data.shape[0] < im_data.shape[2]:
+                shape = (im_data.shape[1], im_data.shape[2])  # (H, W)
+            elif im_data.ndim == 2:
+                shape = im_data.shape  # (H, W)
+            else:
+                shape = (im_data.shape[0], im_data.shape[1])  # (H, W, C) -> (H, W)
+        else:
+            im = Image.open(im_file)
+            im.verify()  # PIL verify
+            shape = exif_size(im)  # image size
+            shape = (shape[1], shape[0])  # hw
+            assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
+            if im.format.lower() in {"jpg", "jpeg"}:
+                with open(im_file, "rb") as f:
+                    f.seek(-2, 2)
+                    if f.read() != b"\xff\xd9":  # corrupt JPEG
+                        ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                        msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
         assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
-        if im.format.lower() in {"jpg", "jpeg"}:
-            with open(im_file, "rb") as f:
-                f.seek(-2, 2)
-                if f.read() != b"\xff\xd9":  # corrupt JPEG
-                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                    msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
         nf = 1
     except Exception as e:
         nc = 1
@@ -183,19 +195,29 @@ def verify_image_label(args: tuple) -> list:
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
     try:
-        # Verify images
-        im = Image.open(im_file)
-        im.verify()  # PIL verify
-        shape = exif_size(im)  # image size
-        shape = (shape[1], shape[0])  # hw
+        # Verify images - use tifffile for TIFF files to handle multi-channel float data
+        if im_file.lower().endswith((".tiff", ".tif")):
+            im_data = tifffile_imread(im_file)
+            # Handle (C, H, W) or (H, W) format
+            if im_data.ndim == 3 and im_data.shape[0] < im_data.shape[1] and im_data.shape[0] < im_data.shape[2]:
+                shape = (im_data.shape[1], im_data.shape[2])  # (H, W)
+            elif im_data.ndim == 2:
+                shape = im_data.shape  # (H, W)
+            else:
+                shape = (im_data.shape[0], im_data.shape[1])  # (H, W, C) -> (H, W)
+        else:
+            im = Image.open(im_file)
+            im.verify()  # PIL verify
+            shape = exif_size(im)  # image size
+            shape = (shape[1], shape[0])  # hw
+            assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+            if im.format.lower() in {"jpg", "jpeg"}:
+                with open(im_file, "rb") as f:
+                    f.seek(-2, 2)
+                    if f.read() != b"\xff\xd9":  # corrupt JPEG
+                        ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                        msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
         assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
-        if im.format.lower() in {"jpg", "jpeg"}:
-            with open(im_file, "rb") as f:
-                f.seek(-2, 2)
-                if f.read() != b"\xff\xd9":  # corrupt JPEG
-                    ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                    msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
 
         # Verify labels
         if os.path.isfile(lb_file):

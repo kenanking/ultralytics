@@ -4,6 +4,9 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn.functional as F
+from scipy.ndimage import maximum_filter, uniform_filter
 from tifffile import imwrite
 from tqdm import tqdm
 
@@ -35,6 +38,166 @@ def parse_class_mapping(class_str):
     new_id_to_name = {old_to_new[old_id]: name for old_id, name in id_to_name.items()}
 
     return new_id_to_name, old_to_new
+
+
+def compute_magnitude_db(rd_complex: np.ndarray) -> np.ndarray:
+    """Compute magnitude in dB scale.
+
+    Args:
+        rd_complex: Complex-valued RD matrix
+
+    Returns:
+        Magnitude in dB (normalized to 0-1 range)
+    """
+    magnitude = np.abs(rd_complex)
+    # Avoid log(0) by adding small epsilon
+    magnitude_db = 20 * np.log10(magnitude + 1e-10)
+    # Normalize to 0-1 range
+    magnitude_db = (magnitude_db - magnitude_db.min()) / (magnitude_db.max() - magnitude_db.min() + 1e-10)
+    return magnitude_db.astype(np.float32)
+
+
+def compute_linear_stretched(rd_complex: np.ndarray, sigma_factor: float = 25.0) -> np.ndarray:
+    """Compute linear stretched image with sigma clipping.
+
+    Args:
+        rd_complex: Complex-valued RD matrix
+        sigma_factor: Number of sigma for clipping (default 25)
+
+    Returns:
+        Linear stretched magnitude (normalized to 0-1 range)
+    """
+    magnitude = np.abs(rd_complex)
+    mean_val = np.mean(magnitude)
+    std_val = np.std(magnitude)
+
+    # Clip values beyond sigma_factor * std
+    lower_bound = 0
+    upper_bound = mean_val + sigma_factor * std_val
+
+    clipped = np.clip(magnitude, lower_bound, upper_bound)
+    # Normalize to 0-1 range
+    normalized = (clipped - clipped.min()) / (clipped.max() - clipped.min() + 1e-10)
+    return normalized.astype(np.float32)
+
+
+def compute_local_entropy(rd_complex: np.ndarray, window_size: int = 7, num_bins: int = 64) -> np.ndarray:
+    """Compute local entropy using PyTorch for GPU acceleration.
+
+    Args:
+        rd_complex: Complex-valued RD matrix
+        window_size: Size of the sliding window
+        num_bins: Number of bins for histogram
+
+    Returns:
+        Local entropy map (normalized to 0-1 range)
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    magnitude = np.abs(rd_complex)
+
+    # Normalize magnitude to [0, 1]
+    mag_normalized = (magnitude - magnitude.min()) / (magnitude.max() - magnitude.min() + 1e-10)
+
+    # Quantize to bins
+    quantized = np.clip((mag_normalized * num_bins).astype(np.int64), 0, num_bins - 1)
+
+    # Convert to torch tensor
+    quantized_tensor = torch.from_numpy(quantized).to(device)
+
+    # Create one-hot encoding
+    one_hot = torch.zeros(num_bins, *quantized.shape, dtype=torch.float32, device=device)
+    for i in range(num_bins):
+        one_hot[i] = (quantized_tensor == i).float()
+
+    # Create averaging kernel
+    kernel = torch.ones(1, 1, window_size, window_size, dtype=torch.float32, device=device)
+    kernel = kernel / (window_size**2)
+
+    # Apply convolution to each bin
+    padding = window_size // 2
+    one_hot = one_hot.unsqueeze(1)  # Shape: (num_bins, 1, H, W)
+    local_probs = F.conv2d(one_hot, kernel, padding=padding)
+    local_probs = local_probs.squeeze(1)  # Shape: (num_bins, H, W)
+
+    # Compute entropy: -sum(p * log(p))
+    log_probs = torch.log2(local_probs + 1e-10)
+    entropy_map = -torch.sum(local_probs * log_probs, dim=0)
+
+    # Convert back to numpy
+    entropy_map = entropy_map.cpu().numpy()
+
+    # Normalize to 0-1 range
+    entropy_map = (entropy_map - entropy_map.min()) / (entropy_map.max() - entropy_map.min() + 1e-10)
+    return entropy_map.astype(np.float32)
+
+
+def compute_energy_concentration(rd_complex: np.ndarray, window_size: int = 7) -> np.ndarray:
+    """Compute energy concentration ratio in a sliding window.
+
+    Energy concentration = (max energy in window) / (total energy in window)
+    High values indicate concentrated energy (potential targets).
+
+    Args:
+        rd_complex: Complex-valued RD matrix
+        window_size: Size of the sliding window
+
+    Returns:
+        Energy concentration map (normalized to 0-1 range)
+    """
+    energy = np.abs(rd_complex) ** 2
+
+    # Compute local max using fast morphological operation
+    local_max = maximum_filter(energy, size=window_size, mode="reflect")
+
+    # Compute local sum (total energy in window)
+    local_sum = uniform_filter(energy, size=window_size, mode="reflect") * (window_size**2)
+
+    # Compute concentration ratio: max / sum
+    concentration_map = local_max / (local_sum + 1e-10)
+
+    # Normalize to 0-1 range
+    concentration_map = (concentration_map - concentration_map.min()) / (
+        concentration_map.max() - concentration_map.min() + 1e-10
+    )
+    return concentration_map.astype(np.float32)
+
+
+def compute_local_variance(rd_complex: np.ndarray, window_size: int = 7) -> np.ndarray:
+    """Compute local variance in a sliding window.
+
+    Args:
+        rd_complex: Complex-valued RD matrix
+        window_size: Size of the sliding window
+
+    Returns:
+        Local variance map (normalized to 0-1 range)
+    """
+    magnitude = np.abs(rd_complex)
+
+    # Compute local mean
+    local_mean = uniform_filter(magnitude, size=window_size, mode="reflect")
+    # Compute local mean of squared values
+    local_mean_sq = uniform_filter(magnitude**2, size=window_size, mode="reflect")
+    # Variance = E[X^2] - E[X]^2
+    variance_map = local_mean_sq - local_mean**2
+    variance_map = np.maximum(variance_map, 0)  # Ensure non-negative
+
+    # Normalize to 0-1 range (using log scale for better visualization)
+    variance_map_log = np.log10(variance_map + 1e-10)
+    variance_map_normalized = (variance_map_log - variance_map_log.min()) / (
+        variance_map_log.max() - variance_map_log.min() + 1e-10
+    )
+    return variance_map_normalized.astype(np.float32)
+
+
+# Registry of available channel methods
+CHANNEL_METHODS = {
+    "linear_stretched": compute_linear_stretched,
+    "magnitude_db": compute_magnitude_db,
+    "local_entropy": compute_local_entropy,
+    "energy_concentration": compute_energy_concentration,
+    "local_variance": compute_local_variance,
+}
 
 
 def compute_slice_positions(total_size, slice_size, min_overlap_ratio=0.2):
@@ -134,8 +297,9 @@ def process_image(
     target_w=1024,
     overlap_ratio=0.2,
     old_to_new=None,
+    channel_methods=None,
 ):
-    """Process single image: convert to magnitude, normalize, slice, save.
+    """Process single image: compute multi-channel representation, slice, save.
 
     Args:
         npy_path: Path to input NPY file
@@ -146,21 +310,26 @@ def process_image(
         target_w: Target slice width
         overlap_ratio: Overlap ratio between slices
         old_to_new: Dict mapping old class IDs to new IDs
+        channel_methods: List of channel method names (default: ["linear_stretched"])
 
     Returns:
         Number of slices generated
     """
+    if channel_methods is None:
+        channel_methods = ["linear_stretched"]
+
     # Load complex data
     data = np.load(npy_path)
     orig_h, orig_w = data.shape
 
-    # Compute magnitude and normalize per-image to [0, 1]
-    magnitude = np.abs(data)
-    mag_min, mag_max = magnitude.min(), magnitude.max()
-    if mag_max > mag_min:
-        normalized = (magnitude - mag_min) / (mag_max - mag_min)
-    else:
-        normalized = np.zeros_like(magnitude, dtype=np.float32)
+    # Compute each channel
+    channels = []
+    for method_name in channel_methods:
+        channel_data = CHANNEL_METHODS[method_name](data)
+        channels.append(channel_data)
+
+    # Stack channels: shape (C, H, W)
+    multi_channel = np.stack(channels, axis=0)
 
     # Load labels
     labels = []
@@ -178,8 +347,12 @@ def process_image(
 
     for y_start, y_end in h_slices:
         for x_start, x_end in w_slices:
-            # Extract slice
-            img_slice = normalized[y_start:y_end, x_start:x_end]
+            # Extract slice from all channels: (C, H, W)
+            img_slice = multi_channel[:, y_start:y_end, x_start:x_end]
+
+            # For single channel, squeeze to (H, W) for backward compatibility
+            if img_slice.shape[0] == 1:
+                img_slice = img_slice[0]
 
             # Adjust labels for this slice
             slice_labels = adjust_labels_for_slice(labels, orig_h, orig_w, y_start, y_end, x_start, x_end, old_to_new)
@@ -199,15 +372,20 @@ def process_image(
     return slice_idx
 
 
-def create_data_yaml(output_dir, class_names):
+def create_data_yaml(output_dir, class_names, num_channels=1):
     """Create data.yaml for the dataset.
 
     Args:
         output_dir: Output dataset directory
         class_names: Dict mapping class ID to name
+        num_channels: Number of input channels
     """
     # Build names section
     names_lines = "\n".join(f"  {cls_id}: {name}" for cls_id, name in sorted(class_names.items()))
+
+    # Build normalization arrays for multi-channel
+    mean_str = ", ".join(["0.0"] * num_channels)
+    std_str = ", ".join(["1.0"] * num_channels)
 
     yaml_content = f"""path: {output_dir.resolve()}
 train: train/images
@@ -216,11 +394,11 @@ val: val/images
 names:
 {names_lines}
 
-channels: 1
+channels: {num_channels}
 
 normalize:
-  mean: [0.0]
-  std: [1.0]
+  mean: [{mean_str}]
+  std: [{std_str}]
 
 padding_value: 0.0
 """
@@ -230,16 +408,22 @@ padding_value: 0.0
 
 
 def main():
+    available_methods = ", ".join(CHANNEL_METHODS.keys())
     parser = argparse.ArgumentParser(
-        description="Convert radar NPY to TIFF with class filtering",
+        description="Convert radar NPY to TIFF with class filtering and multi-channel support",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
 Examples:
-  # Keep only classes 0 and 1
+  # Keep only classes 0 and 1 (single channel, default)
   python generate_radar_tiff_dataset.py --classes "0:target,1:reflector"
 
-  # Keep classes 0, 1, 3 (3 will be remapped to 2)
-  python generate_radar_tiff_dataset.py --classes "0:target,1:reflector,3:clutter"
+  # Multi-channel: magnitude_db + local_entropy
+  python generate_radar_tiff_dataset.py --channels "magnitude_db,local_entropy"
+
+  # All 5 channels
+  python generate_radar_tiff_dataset.py --channels "magnitude_db,linear_stretched,local_entropy,energy_concentration,local_variance"
+
+Available channel methods: {available_methods}
         """,
     )
     parser.add_argument(
@@ -278,10 +462,24 @@ Examples:
         default="0:target,1:reflector",
         help="Class mapping in format 'id:name,id:name,...'. Unmapped classes will be ignored.",
     )
+    parser.add_argument(
+        "--channels",
+        type=str,
+        default="linear_stretched",
+        help=f"Comma-separated processing methods: {available_methods}",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
+
+    # Parse and validate channel methods
+    channel_methods = [m.strip() for m in args.channels.split(",")]
+    for method in channel_methods:
+        if method not in CHANNEL_METHODS:
+            raise ValueError(f"Unknown channel method: '{method}'. Available: {list(CHANNEL_METHODS.keys())}")
+
+    print(f"Channel methods: {channel_methods} ({len(channel_methods)} channels)")
 
     # Parse class mapping
     class_names, old_to_new = parse_class_mapping(args.classes)
@@ -317,13 +515,14 @@ Examples:
                 args.target_w,
                 args.overlap,
                 old_to_new,
+                channel_methods,
             )
             total_slices += slices
 
         print(f"{split}: {len(npy_files)} images -> {total_slices} slices")
 
     # Create data.yaml
-    create_data_yaml(output_dir, class_names or {0: "object"})
+    create_data_yaml(output_dir, class_names or {0: "object"}, len(channel_methods))
     print(f"Dataset saved to {output_dir}")
 
 
